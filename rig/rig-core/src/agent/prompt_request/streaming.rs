@@ -324,6 +324,15 @@ where
         }
     }
 
+    /// Adds additional static context to the prompt request.
+    pub fn with_static_context(
+        mut self,
+        static_context: impl IntoIterator<Item = Document>,
+    ) -> Self {
+        self.static_context.extend(static_context);
+        self
+    }
+
     async fn send(self) -> StreamingResult<M::StreamingResponse> {
         let agent_span = if tracing::Span::current().is_disabled() {
             info_span!(
