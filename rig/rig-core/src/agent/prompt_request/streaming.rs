@@ -267,6 +267,21 @@ where
         self
     }
 
+    /// Adds additional parameters to the prompt request.
+    ///
+    /// This can be used to set additional provider-specific parameters.
+    pub fn with_additional_params(mut self, additional_params: serde_json::Value) -> Self {
+        match self.additional_params {
+            Some(params) => {
+                self.additional_params = Some(crate::json_utils::merge(params, additional_params));
+            }
+            None => {
+                self.additional_params = Some(additional_params);
+            }
+        }
+        self
+    }
+
     /// Add chat history to the prompt request.
     ///
     /// When history is provided, the final [`FinalResponse`] will include the
