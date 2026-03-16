@@ -20,7 +20,7 @@ use crate::{
     completion::{CompletionModel, Document, Message, PromptError, Usage},
     json_utils,
     message::{AssistantContent, ToolChoice, ToolResultContent, UserContent},
-    tool::server::ToolServerHandle,
+    tool::{Context, server::ToolServerHandle},
     wasm_compat::{WasmBoxedFuture, WasmCompatSend},
 };
 
@@ -79,6 +79,8 @@ where
     dynamic_context: DynamicContextStore,
     /// Tool choice setting
     tool_choice: Option<ToolChoice>,
+    /// Optional context to pass to tools
+    tool_context: Option<Context>,
 
     /// Phantom data to track the type of the request
     state: PhantomData<S>,
@@ -111,6 +113,7 @@ where
             tool_server_handle: agent.tool_server_handle.clone(),
             dynamic_context: agent.dynamic_context.clone(),
             tool_choice: agent.tool_choice.clone(),
+            tool_context: None,
             state: PhantomData,
             hook: agent.hook.clone(),
             concurrency: 1,
@@ -146,6 +149,7 @@ where
             tool_server_handle: self.tool_server_handle,
             dynamic_context: self.dynamic_context,
             tool_choice: self.tool_choice,
+            tool_context: self.tool_context,
             state: PhantomData,
             hook: self.hook,
             concurrency: self.concurrency,
@@ -193,11 +197,18 @@ where
             tool_server_handle: self.tool_server_handle,
             dynamic_context: self.dynamic_context,
             tool_choice: self.tool_choice,
+            tool_context: self.tool_context,
             state: PhantomData,
             hook: Some(hook),
             concurrency: self.concurrency,
             output_schema: self.output_schema,
         }
+    }
+
+    /// Attach context to pass to tools during execution
+    pub fn with_tool_context(mut self, context: Context) -> Self {
+        self.tool_context = Some(context);
+        self
     }
 }
 
@@ -453,6 +464,7 @@ where
 
             let hook = self.hook.clone();
             let tool_server_handle = self.tool_server_handle.clone();
+            let tool_context = self.tool_context.clone();
 
             let tool_calls: Vec<AssistantContent> = tool_calls.into_iter().cloned().collect();
             let tool_content = stream::iter(tool_calls)
@@ -483,6 +495,7 @@ where
                     };
 
                     let cloned_chat_history = chat_history.clone().to_vec();
+                    let tool_context = tool_context.clone();
 
                     async move {
                         if let AssistantContent::ToolCall(tool_call) = choice {
@@ -532,8 +545,15 @@ where
                                     }
                                 }
                             }
-                            let output = match tool_server_handle.call_tool(tool_name, &args).await
-                            {
+                            let tool_result = match tool_context.as_ref() {
+                                Some(context) => {
+                                    tool_server_handle
+                                        .call_tool_with_context(tool_name, &args, context.clone())
+                                        .await
+                                }
+                                None => tool_server_handle.call_tool(tool_name, &args).await,
+                            };
+                            let output = match tool_result {
                                 Ok(res) => res,
                                 Err(e) => {
                                     tracing::warn!("Error while executing tool: {e}");
@@ -710,6 +730,12 @@ where
             inner: self.inner.with_hook(hook),
             _phantom: std::marker::PhantomData,
         }
+    }
+
+    /// Attach context to pass to tools during execution
+    pub fn with_tool_context(mut self, context: Context) -> Self {
+        self.inner = self.inner.with_tool_context(context);
+        self
     }
 }
 

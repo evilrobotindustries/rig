@@ -9,7 +9,10 @@ use tracing::Instrument;
 
 use crate::{
     completion::{CompletionError, ToolDefinition},
-    tool::{Tool, ToolDyn, ToolError, ToolSet, ToolSetError},
+    tool::{
+        Tool, ToolDyn, ToolError, ToolSet, ToolSetError,
+        context::{Context, ContextAwareTool, ToolWithContext},
+    },
     vector_store::{VectorSearchRequest, VectorStoreError, VectorStoreIndexDyn, request::Filter},
 };
 
@@ -58,7 +61,7 @@ impl ToolServer {
     }
 
     /// Add a static tool to the agent
-    pub fn tool(mut self, tool: impl Tool + 'static) -> Self {
+    pub fn tool(mut self, tool: impl ToolDyn + 'static) -> Self {
         let toolname = tool.name();
         // This should be practically impossible to fail: cloning the Arc before calling
         // .tool() is impossible since the toolset field is private, and the server cannot
@@ -69,6 +72,11 @@ impl ToolServer {
             .add_tool(tool);
         self.static_tool_names.push(toolname);
         self
+    }
+
+    /// Add a static tool to the agent that uses context.
+    pub fn tool_with_context(self, tool: impl Tool + ToolWithContext + 'static) -> Self {
+        self.tool(ContextAwareTool(tool))
     }
 
     // Add an MCP tool (from `rmcp`) to the agent
@@ -133,6 +141,7 @@ impl ToolServer {
         let ToolServerRequest {
             callback_channel,
             data,
+            context,
         } = message;
 
         match data {
@@ -162,7 +171,12 @@ impl ToolServer {
                 #[cfg(not(all(feature = "wasm", target_arch = "wasm32")))]
                 tokio::spawn(
                     async move {
-                        match toolset.read().await.call(&name, args.clone()).await {
+                        let toolset = toolset.read().await;
+                        let result = match context.as_ref() {
+                            Some(ctx) => toolset.call_with_context(&name, args.clone(), ctx).await,
+                            None => toolset.call(&name, args.clone()).await,
+                        };
+                        match result {
                             Ok(result) => {
                                 let _ = callback_channel
                                     .send(ToolServerResponse::ToolExecuted { result });
@@ -180,7 +194,12 @@ impl ToolServer {
                 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
                 wasm_bindgen_futures::spawn_local(
                     async move {
-                        match toolset.read().await.call(&name, args.clone()).await {
+                        let toolset = toolset.read().await;
+                        let result = match context.as_ref() {
+                            Some(ctx) => toolset.call_with_context(&name, args.clone(), ctx).await,
+                            None => toolset.call(&name, args.clone()).await,
+                        };
+                        match result {
                             Ok(result) => {
                                 let _ = callback_channel
                                     .send(ToolServerResponse::ToolExecuted { result });
@@ -276,6 +295,7 @@ impl ToolServerHandle {
             .send(ToolServerRequest {
                 callback_channel: tx,
                 data: ToolServerRequestMessageKind::AddTool(tool),
+                context: None,
             })
             .await?;
 
@@ -295,6 +315,7 @@ impl ToolServerHandle {
             .send(ToolServerRequest {
                 callback_channel: tx,
                 data: ToolServerRequestMessageKind::AppendToolset(toolset),
+                context: None,
             })
             .await?;
 
@@ -316,6 +337,7 @@ impl ToolServerHandle {
                 data: ToolServerRequestMessageKind::RemoveTool {
                     tool_name: tool_name.to_string(),
                 },
+                context: None,
             })
             .await?;
 
@@ -339,6 +361,38 @@ impl ToolServerHandle {
                     args: args.to_string(),
                     span: tracing::Span::current(),
                 },
+                context: None,
+            })
+            .await?;
+
+        let res = rx.await?;
+
+        match res {
+            ToolServerResponse::ToolExecuted { result, .. } => Ok(result),
+            ToolServerResponse::ToolError { error } => Err(ToolServerError::ToolsetError(
+                ToolSetError::ToolCallError(ToolError::ToolCallError(error.into())),
+            )),
+            invalid => Err(ToolServerError::InvalidMessage(invalid)),
+        }
+    }
+
+    pub async fn call_tool_with_context(
+        &self,
+        tool_name: &str,
+        args: &str,
+        context: Context,
+    ) -> Result<String, ToolServerError> {
+        let (tx, rx) = futures::channel::oneshot::channel();
+
+        self.0
+            .send(ToolServerRequest {
+                callback_channel: tx,
+                data: ToolServerRequestMessageKind::CallTool {
+                    name: tool_name.to_string(),
+                    args: args.to_string(),
+                    span: tracing::Span::current(),
+                },
+                context: Some(context),
             })
             .await?;
 
@@ -363,6 +417,7 @@ impl ToolServerHandle {
             .send(ToolServerRequest {
                 callback_channel: tx,
                 data: ToolServerRequestMessageKind::GetToolDefs { prompt },
+                context: None,
             })
             .await?;
 
@@ -379,6 +434,7 @@ impl ToolServerHandle {
 pub struct ToolServerRequest {
     callback_channel: futures::channel::oneshot::Sender<ToolServerResponse>,
     data: ToolServerRequestMessageKind,
+    context: Option<crate::tool::Context>,
 }
 
 pub enum ToolServerRequestMessageKind {

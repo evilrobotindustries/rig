@@ -6,7 +6,7 @@ use crate::{
     json_utils,
     message::{AssistantContent, ToolChoice, ToolResult, ToolResultContent, UserContent},
     streaming::{StreamedAssistantContent, StreamedUserContent},
-    tool::server::ToolServerHandle,
+    tool::{context::Context, server::ToolServerHandle},
     wasm_compat::{WasmBoxedFuture, WasmCompatSend},
 };
 use futures::{Stream, StreamExt};
@@ -195,6 +195,8 @@ where
     dynamic_context: DynamicContextStore,
     /// Tool choice setting
     tool_choice: Option<ToolChoice>,
+    /// Optional context to pass to tools
+    tool_context: Option<Context>,
     /// Optional JSON Schema for structured output
     output_schema: Option<schemars::Schema>,
     /// Optional per-request hook for events
@@ -224,6 +226,7 @@ where
             tool_server_handle: agent.tool_server_handle.clone(),
             dynamic_context: agent.dynamic_context.clone(),
             tool_choice: agent.tool_choice.clone(),
+            tool_context: None,
             output_schema: agent.output_schema.clone(),
             hook: None,
         }
@@ -251,6 +254,7 @@ where
             tool_server_handle: agent.tool_server_handle.clone(),
             dynamic_context: agent.dynamic_context.clone(),
             tool_choice: agent.tool_choice.clone(),
+            tool_context: None,
             output_schema: agent.output_schema.clone(),
             hook: agent.hook.clone(),
         }
@@ -304,9 +308,16 @@ where
             tool_server_handle: self.tool_server_handle,
             dynamic_context: self.dynamic_context,
             tool_choice: self.tool_choice,
+            tool_context: self.tool_context,
             output_schema: self.output_schema,
             hook: Some(hook),
         }
+    }
+
+    /// Attach context to pass to tools during execution
+    pub fn with_tool_context(mut self, context: Context) -> Self {
+        self.tool_context = Some(context);
+        self
     }
 
     async fn send(self) -> StreamingResult<M::StreamingResponse> {
@@ -499,14 +510,13 @@ where
                                 tool_span.record("gen_ai.tool.name", &tool_call.function.name);
                                 tool_span.record("gen_ai.tool.call.arguments", &tool_args);
 
-                                let tool_result = match
-                                tool_server_handle.call_tool(&tool_call.function.name, &tool_args).await {
-                                    Ok(thing) => thing,
-                                    Err(e) => {
-                                        tracing::warn!("Error while calling tool: {e}");
-                                        e.to_string()
-                                    }
-                                };
+                                let tool_result = match self.tool_context.as_ref() {
+                                    Some(ctx) => tool_server_handle.call_tool_with_context(&tool_call.function.name, &tool_args, ctx.clone()).await,
+                                    None => tool_server_handle.call_tool(&tool_call.function.name, &tool_args).await
+                                }.unwrap_or_else(|e| {
+                                    tracing::warn!("Error while calling tool: {e}");
+                                    e.to_string()
+                                });
 
                                 tool_span.record("gen_ai.tool.call.result", &tool_result);
 
