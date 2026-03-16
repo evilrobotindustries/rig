@@ -9,7 +9,9 @@
 //! The [ToolSet] struct is a collection of tools that can be used by an [Agent](crate::agent::Agent)
 //! and optionally RAGged.
 
+pub(crate) mod context;
 pub mod server;
+
 use std::collections::HashMap;
 use std::fmt;
 
@@ -21,6 +23,8 @@ use crate::{
     embeddings::{embed::EmbedError, tool::ToolSchema},
     wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync},
 };
+
+pub use context::{Context, ToolWithContext};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
@@ -174,9 +178,19 @@ pub trait ToolDyn: WasmCompatSend + WasmCompatSync {
     fn definition<'a>(&'a self, prompt: String) -> WasmBoxedFuture<'a, ToolDefinition>;
 
     fn call<'a>(&'a self, args: String) -> WasmBoxedFuture<'a, Result<String, ToolError>>;
+
+    /// Call the tool with context.
+    fn call_with_context<'a>(
+        &'a self,
+        args: String,
+        context: &'a Context,
+    ) -> WasmBoxedFuture<'a, Result<String, ToolError>>;
+
+    /// Helper to downcast to concrete type (for internal use)
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
-impl<T: Tool> ToolDyn for T {
+impl<T: Tool + 'static> ToolDyn for T {
     fn name(&self) -> String {
         self.name()
     }
@@ -197,6 +211,20 @@ impl<T: Tool> ToolDyn for T {
                 Err(e) => Err(ToolError::JsonError(e)),
             }
         })
+    }
+
+    // Default: fall back to call() without context (ignores context)
+    fn call_with_context<'a>(
+        &'a self,
+        args: String,
+        _context: &'a Context,
+    ) -> WasmBoxedFuture<'a, Result<String, ToolError>> {
+        // Delegate to the regular call() method (which is already implemented above)
+        <Self as ToolDyn>::call(self, args)
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -352,6 +380,20 @@ pub mod rmcp {
                     .collect::<String>())
             })
         }
+
+        // Default: fall back to call() without context (ignores context)
+        fn call_with_context<'a>(
+            &'a self,
+            args: String,
+            _context: &'a crate::tool::Context,
+        ) -> WasmBoxedFuture<'a, Result<String, ToolError>> {
+            // Delegate to the regular call() method (which is already implemented above)
+            <Self as ToolDyn>::call(self, args)
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 }
 
@@ -399,6 +441,17 @@ impl ToolType {
         match self {
             ToolType::Simple(tool) => tool.call(args).await,
             ToolType::Embedding(tool) => tool.call(args).await,
+        }
+    }
+
+    pub async fn call_with_context(
+        &self,
+        args: String,
+        context: &Context,
+    ) -> Result<String, ToolError> {
+        match self {
+            ToolType::Simple(tool) => tool.call_with_context(args, context).await,
+            ToolType::Embedding(tool) => tool.call_with_context(args, context).await,
         }
     }
 }
@@ -497,6 +550,25 @@ impl ToolSet {
                 serde_json::to_string_pretty(&args).unwrap()
             );
             Ok(tool.call(args).await?)
+        } else {
+            Err(ToolSetError::ToolNotFoundError(toolname.to_string()))
+        }
+    }
+
+    /// Call a tool with the given name, arguments, and context
+    pub async fn call_with_context(
+        &self,
+        toolname: &str,
+        args: String,
+        context: &Context,
+    ) -> Result<String, ToolSetError> {
+        if let Some(tool) = self.tools.get(toolname) {
+            tracing::debug!(target: "rig",
+                "Calling tool {toolname} with context (type: {}) and args:\n{}",
+                std::any::type_name_of_val(&**context),
+                serde_json::to_string_pretty(&args).unwrap()
+            );
+            Ok(tool.call_with_context(args, context).await?)
         } else {
             Err(ToolSetError::ToolNotFoundError(toolname.to_string()))
         }

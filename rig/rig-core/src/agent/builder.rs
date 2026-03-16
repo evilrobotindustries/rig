@@ -9,6 +9,7 @@ use crate::{
     message::ToolChoice,
     tool::{
         Tool, ToolDyn, ToolSet,
+        context::{ContextAwareTool, ToolWithContext},
         server::{ToolServer, ToolServerHandle},
     },
     vector_store::VectorStoreIndexDyn,
@@ -274,7 +275,7 @@ where
     ///
     /// This transitions the builder to the `WithBuilderTools` state, where
     /// additional tools can be added but `tool_server_handle()` is no longer available.
-    pub fn tool(self, tool: impl Tool + 'static) -> AgentBuilder<M, P, WithBuilderTools> {
+    pub fn tool(self, tool: impl ToolDyn + 'static) -> AgentBuilder<M, P, WithBuilderTools> {
         let toolname = tool.name();
         AgentBuilder {
             name: self.name,
@@ -296,6 +297,14 @@ where
             hook: self.hook,
             output_schema: self.output_schema,
         }
+    }
+
+    /// Add a static tool that uses context to the agent.
+    pub fn tool_with_context(
+        self,
+        tool: impl Tool + ToolWithContext + 'static,
+    ) -> AgentBuilder<M, P, WithBuilderTools> {
+        self.tool(ContextAwareTool(tool))
     }
 
     /// Add a vector of boxed static tools to the agent.
@@ -523,11 +532,16 @@ where
     P: PromptHook<M>,
 {
     /// Add another static tool to the agent.
-    pub fn tool(mut self, tool: impl Tool + 'static) -> Self {
+    pub fn tool(mut self, tool: impl ToolDyn + 'static) -> Self {
         let toolname = tool.name();
         self.tool_state.tools.add_tool(tool);
         self.tool_state.static_tools.push(toolname);
         self
+    }
+
+    /// Add another static tool that uses context to the agent.
+    pub fn tool_with_context(self, tool: impl Tool + ToolWithContext + 'static) -> Self {
+        self.tool(ContextAwareTool(tool))
     }
 
     /// Add a vector of boxed static tools to the agent.
